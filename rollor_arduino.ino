@@ -1,79 +1,104 @@
-#include <HTTPClient.h>
 #include <WiFi.h>
-
+#include <HTTPClient.h>
 #include <FastLED.h>
-
 #include <ArduinoJson.h>
+#include <WebServer.h>
 
+// WiFiの認証情報
 #ifndef WIFI_SSID
-#define WIFI_SSID "KANASSI-PC 8866"  // WiFi SSID (2.4GHz only)
+#define WIFI_SSID "kamashi-pc"  // WiFiのSSID（ネットワーク名）
 #endif
 
 #ifndef WIFI_PASSWORD
-#define WIFI_PASSWORD "w2puwmf3"  // WiFiパスワード
+#define WIFI_PASSWORD "kamashipc"  // WiFiのパスワード
 #endif
 
-String url = "http://192.168.137.1:8000";
+// 固定IPアドレスの設定
+IPAddress local_IP(10, 42, 0, 184);    // ESPに固定するIPアドレス（10.42.0.xネットワーク内）
+IPAddress gateway(10, 42, 0, 1);       // ゲートウェイアドレス（通常はルーターのアドレス）
+IPAddress subnet(255, 255, 255, 0);    // サブネットマスク（ネットワーク範囲の定義）
+IPAddress primaryDNS(8, 8, 8, 8);      // プライマリDNSサーバー（Google DNSを使用）
+IPAddress secondaryDNS(8, 8, 4, 4);    // セカンダリDNSサーバー（予備のDNS、こちらもGoogle DNS）
 
-#define LED_PIN     D8
-#define NUM_LEDS   60
-#define BRIGHTNESS  50
-#define LED_TYPE    WS2812B
-#define COLOR_ORDER GRB
-CRGB leds[NUM_LEDS];
+// LEDストリップの設定
+#define LED_PIN     D8              // LEDストリップが接続されるピン
+#define NUM_LEDS    60              // LEDの個数
+#define BRIGHTNESS  50              // LEDの明るさ（0〜255の範囲）
+#define LED_TYPE    WS2812B         // 使用しているLEDのタイプ
+#define COLOR_ORDER GRB              // LEDストリップの色順（Green, Red, Blue）
+CRGB leds[NUM_LEDS];                // LEDのデータを格納する配列
 
-void setup() {
-    Serial.begin(115200);
+// Webサーバーオブジェクトを作成（ポート5000で動作）
+WebServer server(5000);              // ESPがホストするサーバーをポート5000で起動
 
-    WiFi.mode(WIFI_STA);
-    delay(500);
-    WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+// POSTリクエストを処理してLEDの色を変更する関数
+void handleColorPost() {
+  // リクエストがボディを持っているか確認
+  if (server.hasArg("plain")) {
+    String body = server.arg("plain");  // リクエストのボディを取得
 
-    delay( 3000 ); // power-up safety delay
-    FastLED.addLeds<LED_TYPE, LED_PIN, COLOR_ORDER>(leds, NUM_LEDS).setCorrection( TypicalLEDStrip );
-    FastLED.setBrightness(BRIGHTNESS);
-}
+    // 受信したJSONデータを解析
+    StaticJsonDocument<200> doc;  // JSON解析用のドキュメントを作成
+    DeserializationError error = deserializeJson(doc, body);  // JSONをデシリアライズ
 
-void loop() {
-    WiFiClient client;
-    HTTPClient http;
-
-    if (!http.begin(client, url)) {
-        Serial.println("Failed HTTPClient begin!");
-        return;
-    }
-
-    Serial.println("HTTPClient begin!");
-    http.addHeader("Content-Type", "application/json");
-    int responseCode = http.GET();
-    String body = http.getString();
-    Serial.println(responseCode);
-    Serial.println(body);
-
-    JsonDocument doc;
-
-    DeserializationError error = deserializeJson(doc, body);
-
+    // JSONの解析に失敗した場合、エラーメッセージを返す
     if (error) {
       Serial.print("deserializeJson() failed: ");
       Serial.println(error.c_str());
+      server.send(400, "text/plain", "Invalid JSON");  // 400エラーを返す
       return;
     }
 
-    JsonObject color = doc["color"];
-    int color_red = color["red"]; // 255
-    int color_green = color["green"]; // 0
-    int color_blue = color["blue"]; // 255
+    // JSONドキュメントからRGB値を取得
+    int red = doc["r"];
+    int green = doc["g"];
+    int blue = doc["b"];
 
-    Serial.println("red:" + String(color_red) + "green:" + String(color_green) + "blue:" + String(color_blue));
-
-    http.end();
-
-    for(int i=0; i<NUM_LEDS; i++) { // For each pixel...
-      leds[i] = CRGB( color_red, color_green, color_blue);
-      FastLED.show();
-      delay(1); // Pause before next pass through loop
+    // 取得したRGB値を使って全てのLEDの色を変更
+    for (int i = 0; i < NUM_LEDS; i++) {
+      leds[i] = CRGB(red, green, blue);
     }
+    FastLED.show();  // LEDストリップを更新
 
-    delay(500);
+    // クライアントに成功メッセージを返す
+    server.send(200, "text/plain", "Color updated successfully");
+
+    // 受信したRGB値をシリアルモニターに表示
+    Serial.printf("Received color: R=%d, G=%d, B=%d\n", red, green, blue);
+  } else {
+    // ボディが存在しない場合、エラーメッセージを返す
+    server.send(400, "text/plain", "No JSON body received");
+  }
+}
+
+void setup() {
+  Serial.begin(115200);  // デバッグ用のシリアル通信を開始
+
+  // WiFiに接続する前に固定IPアドレスを設定
+  if (!WiFi.config(local_IP, gateway, subnet, primaryDNS, secondaryDNS)) {
+    Serial.println("Failed to configure static IP");
+  }
+
+  // WiFiに接続開始
+  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(1000);  // 1秒待って再試行
+    Serial.println("WiFiに接続中...");
+  }
+  Serial.println("WiFiに接続完了");
+
+  // LEDストリップを初期化
+  FastLED.addLeds<LED_TYPE, LED_PIN, COLOR_ORDER>(leds, NUM_LEDS).setCorrection(TypicalLEDStrip);
+  FastLED.setBrightness(BRIGHTNESS);  // LEDストリップの明るさを設定
+
+  // POSTリクエストのエンドポイント（/ws）を定義し、ハンドラ関数を設定
+  server.on("/ws", HTTP_POST, handleColorPost);
+
+  // サーバーを開始
+  server.begin();
+  Serial.println("HTTPサーバーが起動しました");
+}
+
+void loop() {
+  server.handleClient();  // クライアントからのリクエストを処理
 }
